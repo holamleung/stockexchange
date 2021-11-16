@@ -1,0 +1,33 @@
+{% extends "layout.html" %}
+
+{% block title %}
+    History
+{% endblock %}
+
+{% block main %}
+	<table class="table table-striped">
+		<thead>
+			<tr>
+				<th class="row-text">Type</th>
+				<th>Symbol</th>
+				<th>Shares</th>
+				<th>Price</th>
+				<th>Total</th>
+				<th>Transacted</th>
+			</tr>
+		</thead>
+		<tbody>
+			{% for transaction in transactions %}
+				<tr>
+					{% for tag in transaction %}
+						{% if transaction[tag] == None %}
+							<td></td>
+						{% else %}
+							<td>{{ transaction[tag] }}</td>
+						{% endif %}
+					{% endfor %}
+				</tr>
+			{% endfor %}
+		</tbody>
+	</table>
+{% endblock %}

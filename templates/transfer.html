@@ -1,0 +1,21 @@
+{% extends "layout.html" %}
+
+{% block title %}
+    Transfer
+{% endblock %}
+
+{% block main %}
+    <form action="/transfer" method="post">
+        <div class="form-group">
+            <select class="form-select" name="type" required>
+				<option selected disabled value="">Transfer type</option>
+				<option value="in">Transfer In</option>
+				<option value="out">Transfer Out</option>
+			</select>
+        </div>
+		<div class="form-group">
+			<input class="form-control" name="amount" placeholder="Amount" type="number" required>
+		</div>
+        <button class="btn btn-primary" type="submit">Transfer</button>
+    </form>
+{% endblock %}
