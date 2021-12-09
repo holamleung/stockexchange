@@ -1,0 +1,9 @@
+{% extends "layout.html" %}
+
+{% block title %}
+    Error
+{% endblock %}
+
+{% block main %}
+    <img alt="{{ top }}" class="border" src="http://api.memegen.link/images/persian/{{ top | urlencode }}/{{ bottom | urlencode }}.png" title="{{ top }}">
+{% endblock %}

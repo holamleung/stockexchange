@@ -8,9 +8,9 @@
     <form action="/sell" method="post">
         <div class="form-group">
             <select class="form-select" name="symbol" required>
-				<option disabled selected>Symbol</option>
+				<option selected disabled value="">Symbol</option>
 				{% for symbol in symbols %}
-					<option value="{{ symbol }}">{{ symbol }}</option>
+					<option value="{{ symbol[0] }}">{{ symbol[0] }}</option>
 				{% endfor %}
 			</select>
         </div>

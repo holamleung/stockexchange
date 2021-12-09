@@ -16,13 +16,13 @@
 			</tr>
 		</thead>
 		<tbody>
-			{% for stock in stocks %}
+			{% for summary in summaries %}
 				<tr>
-					<th class="row-text">{{ stock["symbol"] }}</th>
-					<td class="row-text">{{ stock["name"] }}</td>
-					<td>{{ stock["SUM(shares)"] }}</td>
-					<td>{{ stock["market_price"] | usd}}</td>
-					<td>{{ stock["total"] | usd }}</td>
+					<th class="row-text">{{ summary.symbol }}</th>
+					<td class="row-text">{{ summary.name }}</td>
+					<td>{{ summary.shares }}</td>
+					<td>{{ summary.price }}</td>
+					<td>{{ summary.total }}</td>
 				</tr>
 			{% endfor %}
 			<tr>

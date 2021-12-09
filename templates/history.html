@@ -20,10 +20,10 @@
 			{% for transaction in transactions %}
 				<tr>
 					{% for tag in transaction %}
-						{% if transaction[tag] == None %}
+						{% if tag == None %}
 							<td></td>
 						{% else %}
-							<td>{{ transaction[tag] }}</td>
+							<td>{{ tag }}</td>
 						{% endif %}
 					{% endfor %}
 				</tr>

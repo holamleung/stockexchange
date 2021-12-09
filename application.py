@@ -1,10 +1,13 @@
 import os
+from collections import namedtuple
+from tempfile import mkdtemp
 
-from cs50 import SQL
 from flask import Flask, flash, redirect, render_template, request, session
 from flask_session import Session
-from tempfile import mkdtemp
-from werkzeug.exceptions import default_exceptions, HTTPException, InternalServerError
+from sqlalchemy import create_engine
+from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.sql import text
+from werkzeug.exceptions import HTTPException, InternalServerError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from helpers import apology, login_required, lookup, usd
@@ -24,7 +27,6 @@ def after_request(response):
     response.headers["Pragma"] = "no-cache"
     return response
 
-
 # Custom filter
 app.jinja_env.filters["usd"] = usd
 
@@ -34,11 +36,31 @@ app.config["SESSION_PERMANENT"] = False
 app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
-# Configure CS50 Library to use SQLite database
-db = SQL("sqlite:///stockx.db")
+# Make sure Database url is set
+if not os.getenv("DATABASE_URL"):
+    raise RuntimeError("Database url not set")
 
-# Add an additional table to the SQLite database if it hasn't been created
-db.execute("CREATE TABLE IF NOT EXISTS transactions (id INTEGER, user_id INTEGER NOT NULL, type TEXT NOT NULL, symbol TEXT, shares INTEGER, price NUMERIC, total NUMERIC NOT NULL, transacted DATETIME NOT NULL, PRIMARY KEY (id), FOREIGN KEY (user_id) REFERENCES users(id))")
+# Configure SQLAlchemy to use database
+engine = create_engine(
+    os.getenv("DATABASE_URL"),
+    connect_args={"check_same_thread": False}
+    )
+db = scoped_session(sessionmaker(bind=engine))
+
+# Create necessary tables to the database if they haven't been created
+db.execute(text("""
+    CREATE TABLE IF NOT EXISTS users (id INTEGER, username TEXT NOT NULL,
+    hash TEXT NOT NULL, cash NUMERIC NOT NULL DEFAULT 10000.00,
+    PRIMARY KEY(id))
+    """))
+db.execute("CREATE UNIQUE INDEX IF NOT EXISTS username ON users (username)")
+db.execute(text("""
+    CREATE TABLE IF NOT EXISTS transactions (id INTEGER,
+    user_id INTEGER NOT NULL, type TEXT NOT NULL, symbol TEXT,
+    shares INTEGER, price NUMERIC, total NUMERIC NOT NULL,
+    transacted DATETIME NOT NULL, PRIMARY KEY (id),
+    FOREIGN KEY (user_id) REFERENCES users(id))
+    """))
 
 # Make sure API key is set
 if not os.environ.get("API_KEY"):
@@ -49,18 +71,33 @@ if not os.environ.get("API_KEY"):
 @login_required
 def index():
     """Show portfolio of stocks"""
-    user = db.execute("SELECT * FROM users WHERE id = ?", session["user_id"])
-    cash = user[0]["cash"]
+    
+    # Retrive user's data
+    s = text("SELECT * FROM users WHERE id = :id")
+    user = db.execute(s, {"id": session["user_id"]}).fetchone()
+    cash = user.cash
     balance = cash
-    stocks = db.execute(
-        "SELECT symbol, SUM(shares) FROM transactions WHERE user_id = ? GROUP BY symbol HAVING SUM(shares) > 0 ORDER BY symbol", session["user_id"])
+    
+    # Calculate the current total value of stocks owned by user
+    summaries = []
+    Summary = namedtuple("Summary", ["symbol", "name", "shares", "price", "total"])
+    s = text("""
+        SELECT symbol, SUM(shares) AS shares
+        FROM transactions
+        WHERE user_id = :user_id
+        GROUP BY symbol
+        HAVING SUM(shares) > 0
+        ORDER BY symbol
+        """)
+    stocks = db.execute(s, {"user_id": session["user_id"]}).fetchall()
     for stock in stocks:
-        quote = lookup(stock["symbol"])
-        stock["market_price"] = quote["price"]
-        stock["name"] = quote["name"]
-        stock["total"] = stock["SUM(shares)"] * stock["market_price"]
-        balance += stock["total"]
-    return render_template("index.html", stocks=stocks, cash=usd(cash), balance=usd(balance))
+        quote = lookup(stock.symbol)
+        total = stock.shares * quote["price"]
+        balance += total
+        summaries.append(Summary(stock.symbol, quote["name"], stock.shares,
+            usd(quote["price"]), usd(total)))
+    return render_template("index.html", summaries=summaries, cash=usd(cash),
+        balance=usd(balance))
 
 
 @app.route("/buy", methods=["GET", "POST"])
@@ -91,8 +128,9 @@ def buy():
             shares = int(shares)
         price = quote["price"]
         cost = price * shares
-        rows = db.execute("SELECT * FROM users WHERE id = ?", session["user_id"])
-        cash = rows[0]["cash"]
+        s = text("SELECT * FROM users WHERE id = :id")
+        user = db.execute(s, {"id": session["user_id"]}).fetchone()
+        cash = user.cash
 
         # Ensure enough cash
         if cost > cash:
@@ -100,8 +138,20 @@ def buy():
 
         # Add transaction to the database
         else:
-            db.execute("INSERT INTO transactions (user_id, type, symbol, shares, price, total, transacted) VALUES(?, 'buy', ?, ?, ?, ?, datetime('now', 'localtime'))", session["user_id"], symbol, shares, usd(price), usd(cost))
-            db.execute("UPDATE users SET cash = cash - ? WHERE id = ?", cost, session["user_id"])
+            s = text("""
+                INSERT INTO transactions (user_id, type, symbol, shares,
+                price, total, transacted)
+                VALUES(:user_id, 'buy', :symbol, :shares, :price, :total,
+                datetime('now', 'localtime'))
+                """)
+            db.execute(s, {"user_id": session["user_id"], "symbol": symbol,
+                "shares": shares, "price": usd(price), "total": usd(cost)})
+            s = text("""
+                UPDATE users SET cash = (cash - :cost)
+                WHERE id = :id
+                """)
+            db.execute(s, {"cost": cost, "id": session["user_id"]})
+            db.commit()
 
             # Notify buy was made
             message = "Bought %i share(s) of %s" % (shares, symbol)
@@ -119,7 +169,12 @@ def buy():
 @login_required
 def history():
     """Show history of transactions"""
-    transactions = db.execute("SELECT type, symbol, shares, price, total, transacted FROM transactions WHERE user_id = ?", session["user_id"])
+    s = text("""
+        SELECT type, symbol, shares, price, total, transacted
+        FROM transactions
+        WHERE user_id = :user_id
+        """)
+    transactions = db.execute(s, {"user_id": session["user_id"]}).fetchall()
     return render_template("history.html", transactions=transactions)
 
 
@@ -132,24 +187,28 @@ def login():
 
     # User reached route via POST (as by submitting a form via POST)
     if request.method == "POST":
+        
+        username = request.form.get("username")
+        password = request.form.get("password")
 
         # Ensure username was submitted
-        if not request.form.get("username"):
+        if not username:
             return apology("must provide username", 403)
-
+        
         # Ensure password was submitted
-        elif not request.form.get("password"):
+        elif not password:
             return apology("must provide password", 403)
 
         # Query database for username
-        rows = db.execute("SELECT * FROM users WHERE username = ?", request.form.get("username"))
+        user = db.execute("SELECT * FROM users WHERE username = :username",
+            {"username": username}).fetchone()
 
         # Ensure username exists and password is correct
-        if len(rows) != 1 or not check_password_hash(rows[0]["hash"], request.form.get("password")):
+        if user is None or not check_password_hash(user.hash, password):
             return apology("invalid username and/or password", 403)
 
         # Remember which user has logged in
-        session["user_id"] = rows[0]["id"]
+        session["user_id"] = user.id
 
         # Redirect user to home page
         return redirect("/")
@@ -209,8 +268,9 @@ def register():
             return apology("missing username", 400)
 
         # Ensure not duplicated username
-        rows = db.execute("SELECT * FROM users WHERE username = ?", username)
-        if len(rows) == 1:
+        s = text("SELECT * FROM users WHERE username = :username")
+        rows = db.execute(s, {"username": username}).fetchall()
+        if len(rows) > 0:
             return apology("username is not available", 400)
         password = request.form.get("password")
 
@@ -224,11 +284,13 @@ def register():
             return apology("passwords don't match", 400)
 
         # Hash user's password
-        pwhash = generate_password_hash(password, method="pbkdf2:sha256", salt_length=8)
+        pwhash = generate_password_hash(password, method="pbkdf2:sha256",
+            salt_length=8)
 
         # Store new user's login in database
-        db.execute("INSERT INTO users (username, hash) VALUES(?, ?)", username, pwhash)
-
+        s = text("INSERT INTO users (username, hash) VALUES(:username, :hash)")
+        db.execute(s, {"username": username, "hash": pwhash})
+        db.commit()
         # Notify registration finished
         flash("Registration success!")
 
@@ -265,9 +327,15 @@ def sell():
         else:
             shares_sell = int(shares_sell)
         price = quote["price"]
-        owns = db.execute(
-            "SELECT SUM(shares) FROM transactions WHERE user_id = ? AND symbol = ? GROUP BY symbol", session["user_id"], symbol)
-        shares_own = owns[0]["SUM(shares)"]
+        s = text("""
+            SELECT SUM(shares) AS shares
+            FROM transactions
+            WHERE user_id = :user_id AND symbol = :symbol
+            GROUP BY symbol
+            """)
+        owns = db.execute(s, {"user_id": session["user_id"],
+            "symbol": symbol}).fetchone()
+        shares_own = owns.shares
 
         # Ensure user has enough shares to sell
         if shares_sell > shares_own:
@@ -276,9 +344,20 @@ def sell():
             income = shares_sell * price
 
         # Update sell to the database
-        db.execute(
-            "INSERT INTO transactions (user_id, type, symbol, shares, price, total, transacted) VALUES(?, 'sell', ?, ?, ?, ?, datetime('now', 'localtime'))", session["user_id"], symbol, -(shares_sell), usd(price), usd(income))
-        db.execute("UPDATE users SET cash = cash + ? WHERE id = ?", income, session["user_id"])
+        s = text("""
+            INSERT INTO transactions (user_id, type, symbol, shares, price,
+            total, transacted)
+            VALUES(:user_id, 'sell', :symbol, :shares, :price, :total,
+            datetime('now', 'localtime'))
+            """)
+        db.execute(s, {"user_id": session["user_id"], "symbol": symbol,
+            "shares": -(shares_sell), "price": usd(price),
+            "total": usd(income)})
+        s = text("""
+            UPDATE users SET cash = (cash + :income) WHERE id = :user_id
+            """)
+        db.execute(s, {"income": income, "user_id": session["user_id"]})
+        db.commit()
 
         # Notify sell was made
         message = "Sold %i share(s) of %s" % (shares_sell, symbol)
@@ -291,11 +370,14 @@ def sell():
     else:
 
         # A list of symbol user own
-        symbols = []
-        transactions = db.execute(
-            "SELECT symbol FROM transactions WHERE user_id = ? GROUP BY symbol HAVING SUM(shares) > 0 ORDER BY symbol", session["user_id"])
-        for transaction in transactions:
-            symbols.append(transaction["symbol"])
+        s = text("""
+            SELECT symbol
+            FROM transactions
+            WHERE user_id = :user_id
+            GROUP BY symbol HAVING SUM(shares) > 0
+            ORDER BY symbol
+            """)
+        symbols = db.execute(s, {"user_id": session["user_id"]}).fetchall()
         return render_template("sell.html", symbols=symbols)
 
 
@@ -311,12 +393,14 @@ def transfer():
         # Ensure amount is submitted
         if not amount:
             return apology("missing number", 400)
-
-        # Ensure amount is positive integer
-        elif not amount.isdigit() or int(amount) <= 0:
+        
+        # Ensure amount is positive float
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
             return apology("invalid number", 400)
-        else:
-            amount = int(amount)
 
         # Ensure transfter type is submitted
         if not request.form.get("type"):
@@ -326,21 +410,37 @@ def transfer():
 
         # If transfer out
         if trans_type == "out":
-            user = db.execute("SELECT cash FROM users WHERE id = ?", session["user_id"])
-            cash = user[0]["cash"]
+            s = text("SELECT cash FROM users WHERE id = :id")
+            user = db.execute(s, {"id": session["user_id"]}).fetchone()
 
             # Ensure user has enought cash in account
-            if amount > cash:
+            if amount > user.cash:
                 return apology("not enough cash", 400)
             else:
-                db.execute("UPDATE users SET cash = cash - ? WHERE id = ?", amount, session["user_id"])
+                s = text("""
+                    UPDATE users
+                    SET cash = (cash - :amount)
+                    WHERE id = :id
+                    """)
+                db.execute(s, {"amount": amount, "id": session["user_id"]})
                 message = "Transfered out %s" % (usd(amount))
 
         # If transfer in
         else:
-            db.execute("UPDATE users SET cash = cash + ? WHERE id = ?", amount, session["user_id"])
+            s = text("""
+                UPDATE users
+                SET cash = (cash + :amount)
+                WHERE id = :id
+                """)
+            db.execute(s, {"amount": amount, "id": session["user_id"]})
             message = "Transfered in %s" % (usd(amount))
-        db.execute("INSERT INTO transactions (user_id, type, total, transacted) VALUES(?, ?, ?, datetime('now', 'localtime'))", session["user_id"], trans_type, usd(amount))
+        s = text("""
+            INSERT INTO transactions (user_id, type, total, transacted)
+            VALUES (:id, :type, :total, datetime('now', 'localtime'))
+            """)
+        db.execute(s, {"id": session["user_id"], "type": trans_type,
+            "total": usd(amount)})
+        db.commit()
 
         # Notify user transfers is made
         flash(message)
